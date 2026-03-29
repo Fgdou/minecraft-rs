@@ -1,6 +1,6 @@
 use std::{boxed, sync::{Arc, Mutex}};
 
-use vulkano::{VulkanLibrary, command_buffer::allocator::StandardCommandBufferAllocator, device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags, physical::PhysicalDeviceType}, image::{Image, ImageUsage, view::ImageView}, instance::{Instance, InstanceCreateFlags, InstanceCreateInfo}, memory::allocator::StandardMemoryAllocator, pipeline::{DynamicState, GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo, graphics::{GraphicsPipelineCreateInfo, color_blend::{ColorBlendAttachmentState, ColorBlendState}, viewport::Viewport}, layout::PipelineDescriptorSetLayoutCreateInfo}, render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass}, swapchain::{Surface, Swapchain, SwapchainCreateInfo}, sync::{self, GpuFuture}};
+use vulkano::{VulkanLibrary, buffer::BufferContents, command_buffer::allocator::StandardCommandBufferAllocator, device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags, physical::PhysicalDeviceType}, image::{Image, ImageUsage, view::ImageView}, instance::{Instance, InstanceCreateFlags, InstanceCreateInfo}, memory::allocator::StandardMemoryAllocator, pipeline::{DynamicState, GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo, graphics::{GraphicsPipelineCreateInfo, color_blend::{ColorBlendAttachmentState, ColorBlendState}, vertex_input::{Vertex, VertexDefinition}, viewport::Viewport}, layout::PipelineDescriptorSetLayoutCreateInfo}, render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass}, swapchain::{Surface, Swapchain, SwapchainCreateInfo}, sync::{self, GpuFuture}};
 use winit::{dpi::PhysicalSize, event_loop::EventLoop, window::Window};
 
 pub struct Engine {
@@ -19,6 +19,13 @@ pub struct RenderContext {
     pipeline: Arc<GraphicsPipeline>,
     viewport: Viewport,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
+}
+
+#[derive(BufferContents, Vertex)]
+#[repr(C)]
+struct MyVertex {
+    #[format(R32G32B32_SFLOAT)]
+    position: [f32; 3],
 }
 
 impl Engine {
@@ -123,7 +130,21 @@ fn select_device(event_loop: &EventLoop<()>) -> (Arc<Instance>, Arc<Device>, Arc
 }
 
 fn resize(old_context: Option<RenderContext>, window: Arc<winit::window::Window>, device: Arc<Device>, instance: Arc<Instance>) -> RenderContext {
-    println!("resize");
+
+    if let Some(mut context) = old_context {
+        println!("resize");
+
+        let (new_swapchain, images) = context.swapchain.recreate(SwapchainCreateInfo {
+            image_extent: window.inner_size().into(),
+            ..context.swapchain.create_info()
+        }).unwrap();
+        context.swapchain = new_swapchain;
+
+        return context;
+    }
+
+    println!("create");
+
 
     let window_size = window.inner_size();
     let surface = Surface::from_window(instance, window.clone()).unwrap();
@@ -184,6 +205,9 @@ fn generate_pipeline(device: Arc<Device>, render_pass: Arc<RenderPass>) -> Arc<G
     }
     let vs = vs::load(device.clone()).unwrap().entry_point("main").unwrap();
     let fs = fs::load(device.clone()).unwrap().entry_point("main").unwrap();
+
+    let vertex_input_state = MyVertex::per_vertex().definition(&vs).unwrap();
+
     let stages = [
         PipelineShaderStageCreateInfo::new(vs),
         PipelineShaderStageCreateInfo::new(fs),
@@ -198,7 +222,7 @@ fn generate_pipeline(device: Arc<Device>, render_pass: Arc<RenderPass>) -> Arc<G
         None,
         GraphicsPipelineCreateInfo {
             stages: stages.into_iter().collect(),
-            vertex_input_state: None,
+            vertex_input_state: Some(vertex_input_state),
             input_assembly_state: Some(Default::default()),
             viewport_state: Some(Default::default()),
             rasterization_state: Some(Default::default()),
@@ -242,7 +266,7 @@ fn generate_swapchain(device: Arc<Device>, window_size: PhysicalSize<u32>, surfa
 
 impl RenderContext {
     fn draw(&self) {
-        println!("draw")
+
     }
 }
 
