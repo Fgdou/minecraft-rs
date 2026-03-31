@@ -1,13 +1,13 @@
-use std::sync::Arc;
+use std::{array::IntoIter, path::Iter, sync::Arc};
 
-use vulkano::{VulkanLibrary, buffer::BufferContents, command_buffer::allocator::StandardCommandBufferAllocator, descriptor_set::allocator::{StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo}, device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags, physical::PhysicalDeviceType}, image::{Image, ImageUsage, view::ImageView}, instance::{Instance, InstanceCreateFlags, InstanceCreateInfo}, memory::allocator::StandardMemoryAllocator, pipeline::{DynamicState, GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo, graphics::{GraphicsPipelineCreateInfo, color_blend::{ColorBlendAttachmentState, ColorBlendState}, vertex_input::{Vertex, VertexDefinition}}, layout::PipelineDescriptorSetLayoutCreateInfo}, render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass}, swapchain::{Surface, Swapchain, SwapchainCreateInfo}, sync::{self, GpuFuture}};
+use vulkano::{Validated, VulkanError, VulkanLibrary, buffer::{Buffer, BufferContents, BufferCreateFlags, BufferCreateInfo, BufferUsage, Subbuffer}, command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo, SubpassBeginInfo, SubpassContents, allocator::StandardCommandBufferAllocator}, descriptor_set::allocator::{StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo}, device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags, physical::PhysicalDeviceType}, image::{Image, ImageUsage, view::ImageView}, instance::{Instance, InstanceCreateFlags, InstanceCreateInfo}, memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator}, pipeline::{DynamicState, GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo, graphics::{GraphicsPipelineCreateInfo, color_blend::{ColorBlendAttachmentState, ColorBlendState}, vertex_input::{Vertex, VertexDefinition}, viewport::Viewport}, layout::PipelineDescriptorSetLayoutCreateInfo}, render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass}, swapchain::{Surface, Swapchain, SwapchainAcquireFuture, SwapchainCreateInfo, SwapchainPresentInfo, acquire_next_image}, sync::{self, GpuFuture}};
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
 #[derive(BufferContents, Vertex)]
 #[repr(C)]
-struct MyVertex {
+pub struct MyVertex {
     #[format(R32G32_SFLOAT)]
-    position: [f32; 2],
+    pub position: [f32; 2],
 }
 
 pub struct RenderContext {
@@ -24,9 +24,12 @@ pub struct RenderContext {
     memory_allocator: Arc<StandardMemoryAllocator>,
     commandbuffer_allocator: Arc<StandardCommandBufferAllocator>,
     descriptorset_allocator: Arc<StandardDescriptorSetAllocator>,
+    vertex_buffer: Subbuffer<[MyVertex]>,
+    viewport: Viewport,
+    should_resize: bool,
 }
 impl RenderContext {
-    pub fn new(event_loop: &winit::event_loop::ActiveEventLoop) -> Self {
+    pub fn new<T>(event_loop: &winit::event_loop::ActiveEventLoop, data: T) -> Self where T: IntoIterator<Item = MyVertex>, T::IntoIter: ExactSizeIterator {
         let library = VulkanLibrary::new().unwrap();
         let required_extensions = Surface::required_extensions(event_loop).unwrap();
         let instance = Instance::new(library, InstanceCreateInfo {
@@ -36,6 +39,11 @@ impl RenderContext {
         }).unwrap();
 
         let window = Arc::new(event_loop.create_window(Default::default()).unwrap());
+        let viewport = Viewport {
+            offset: [0.0, 0.0],
+            extent: window.inner_size().into(),
+            depth_range: (0.0 ..= 1.0),
+        };
         let (device, queue) = select_device(&instance, event_loop);
         let (swapchain, images) = create_swapchain(&instance, &window, &device);
         let render_pass = create_renderpass(&device, &swapchain);
@@ -44,6 +52,18 @@ impl RenderContext {
         let pipeline = create_pipeline(&device, &render_pass);
         let previous_frame_end = Some(sync::now(device.clone()).boxed());
         
+        let vertex_buffer = Buffer::from_iter(
+            memory_allocator.clone(), 
+            BufferCreateInfo {
+                usage: BufferUsage::VERTEX_BUFFER,
+                ..Default::default()
+            }, 
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::HOST_SEQUENTIAL_WRITE | MemoryTypeFilter::PREFER_DEVICE,
+                ..Default::default()
+            }, 
+            data
+        ).unwrap();
 
         Self { 
             instance,
@@ -59,12 +79,14 @@ impl RenderContext {
             memory_allocator, 
             commandbuffer_allocator, 
             descriptorset_allocator,
+            vertex_buffer,
+            viewport,
+            should_resize: false,
         }
     }
 
     pub fn resize(&mut self) {
-        self.recreate_swapchain();
-        self.recreate_framebuffers();
+        self.should_resize = true;
     }
 
     fn recreate_swapchain(&mut self) {
@@ -82,9 +104,116 @@ impl RenderContext {
         self.window.request_redraw();
     }
     
-    pub fn draw(&self) {
-        ()
+    pub fn draw(&mut self) {
+        if self.should_resize {
+            self.recreate_swapchain();
+            self.recreate_framebuffers();
+            self.viewport = Viewport {
+                offset: [0.0, 0.0],
+                extent: self.window.inner_size().into(),
+                depth_range: (0.0 ..= 1.0),
+            };
+            self.should_resize = false;
+        }
+
+        let (image_index, suboptimal, acquire_future) = match get_next_image(self.swapchain.clone()) {
+            None => {
+                self.resize();
+                return;
+            },
+            Some(r) => r
+        };
+        if suboptimal {
+            self.resize();
+        }
+
+        let command_buffer = self.create_command_buffer(image_index);
+
+        let frame = self.previous_frame_end.take().unwrap();
+
+        match self.present_command_buffer(image_index, frame, acquire_future, command_buffer) {
+            None => {
+                self.resize();
+                self.previous_frame_end = Some(sync::now(self.device.clone()).boxed());
+            },
+            Some(future) => {
+                self.previous_frame_end = Some(future);
+            }
+        };
     }
+
+
+    fn create_command_buffer(&self, image_index: u32) -> Arc<PrimaryAutoCommandBuffer> {
+        let mut builder = AutoCommandBufferBuilder::primary(
+            self.commandbuffer_allocator.clone(),
+            self.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        ).unwrap();
+
+        builder
+            .begin_render_pass(
+                RenderPassBeginInfo {
+                    clear_values: vec![Some([0.0, 0.0, 1.0, 1.0].into())],
+                    ..RenderPassBeginInfo::framebuffer(self.framebuffers[image_index as usize].clone())
+                },
+                SubpassBeginInfo {
+                    contents: SubpassContents::Inline,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .set_viewport(0, [self.viewport.clone()].into_iter().collect())
+            .unwrap()
+            .bind_pipeline_graphics(self.pipeline.clone())
+            .unwrap()
+            .bind_vertex_buffers(0, self.vertex_buffer.clone())
+            .unwrap();
+
+        unsafe { builder.draw(self.vertex_buffer.len() as u32, 1, 0, 0) }.unwrap();
+
+        builder
+            .end_render_pass(Default::default())
+            .unwrap();
+
+        builder.build().unwrap()
+    }
+
+    fn present_command_buffer(&self, image_index: u32, previous_frame_end: Box<dyn GpuFuture>, acquire_future: SwapchainAcquireFuture, command_buffer: Arc<PrimaryAutoCommandBuffer>) -> Option<Box<dyn GpuFuture>> {
+        let future = previous_frame_end
+            .join(acquire_future)
+            .then_execute(self.queue.clone(), command_buffer)
+            .unwrap()
+            .then_swapchain_present(
+                self.queue.clone(), 
+                SwapchainPresentInfo::swapchain_image_index(self.swapchain.clone(), image_index),
+            )
+            .then_signal_fence_and_flush();
+
+        match future.map_err(Validated::unwrap) {
+            Ok(future) => {
+                Some(future.boxed())
+            },
+            Err(VulkanError::OutOfDate) => {
+                None
+            },
+            Err(e) => {
+                panic!("failed to flush future: {e}")
+            },
+        }
+    }
+}
+
+
+
+fn get_next_image(swapchain: Arc<Swapchain>) -> Option<(u32, bool, SwapchainAcquireFuture)> {
+    Some(match acquire_next_image(swapchain, None).map_err(Validated::unwrap)
+        {
+            Ok(r) => r,
+            Err(VulkanError::OutOfDate) => {
+                return None;
+            },
+            Err(e) => panic!("failed to acquire next image: {e}")
+        })
 }
 
 fn create_pipeline(device: &Arc<Device>, render_pass: &Arc<RenderPass>) -> Arc<GraphicsPipeline> {

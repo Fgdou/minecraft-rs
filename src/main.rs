@@ -2,7 +2,7 @@ mod render;
 
 use winit::{application::ApplicationHandler, event::WindowEvent, event_loop::EventLoop};
 
-use crate::render::RenderContext;
+use crate::render::{MyVertex, RenderContext};
 
 struct App {
     render_context: Option<RenderContext>,
@@ -10,7 +10,14 @@ struct App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        self.render_context = Some(RenderContext::new(event_loop));
+        let data = [
+            (-0.5, 0.5),
+            (0.5, 0.5),
+            (0.0, -0.5),
+        ].into_iter()
+        .map(|(x, y)| MyVertex{ position: [x, y] });
+
+        self.render_context = Some(RenderContext::new(event_loop, data));
     }
 
     fn about_to_wait(&mut self, _: &winit::event_loop::ActiveEventLoop) {
@@ -35,7 +42,7 @@ impl ApplicationHandler for App {
                 }
             },
             WindowEvent::RedrawRequested => {
-                if let Some(context) = &self.render_context {
+                if let Some(context) = &mut self.render_context {
                     context.draw();
                 }
             },
