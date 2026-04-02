@@ -1,50 +1,41 @@
-use bevy::{DefaultPlugins, app::{App, Plugin, Startup, Update}, ecs::{component::Component, query::With, resource::Resource, schedule::IntoScheduleConfigs, system::{Commands, Query, Res, ResMut}}, time::{Time, Timer, TimerMode}};
+use std::f32::consts::{FRAC_PI_2, PI};
 
-#[derive(Component)]
-struct Person;
-
-#[derive(Component)]
-struct Name(String);
-
-#[derive(Resource)]
-struct GreetTimer(Timer);
+use bevy::{DefaultPlugins, app::{App, Plugin, Startup, Update}, asset::Assets, camera::Camera3d, camera_controller::free_camera::{FreeCamera, FreeCameraPlugin}, color::{Color, LinearRgba}, ecs::{component::Component, query::With, resource::Resource, schedule::IntoScheduleConfigs, system::{Commands, Query, Res, ResMut}}, light::PointLight, math::{Vec2, Vec3, VectorSpace, primitives::{Circle, Plane3d, Rectangle, Sphere}}, mesh::{Mesh, Mesh3d}, pbr::{MeshMaterial3d, StandardMaterial}, time::{Time, Timer, TimerMode}, transform::components::Transform};
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(HelloPlugin)
+        .add_plugins(FreeCameraPlugin)
+        .add_systems(Startup, setup)
         .run();
 }
-
-fn add_people(mut commands: Commands) {
-    commands.spawn((Person, Name("Alpha".into())));
-    commands.spawn((Person, Name("Beta".into())));
-    commands.spawn((Person, Name("Gamma".into())));
-}
-
-fn greet_people(time: Res<Time>, mut timer: ResMut<GreetTimer>, query: Query<&Name, With<Person>>) {
-    if timer.0.tick(time.delta()).just_finished() {
-        for name in query {
-            println!("hello {}!", name.0);
+fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {
+    commands.spawn((
+        Mesh3d(meshes.add(Sphere::new(4.0))),
+        MeshMaterial3d(materials.add(Color::WHITE)),
+        Transform::from_xyz(0.0, 0.0, 0.0),
+    ));
+    commands.spawn((
+        PointLight {
+            shadows_enabled: true,
+            ..Default::default()
+        },
+        Transform::from_xyz(4.0, 10.0, 4.0),
+    ));
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d::new(Vec3::Y, Vec2::new(10.0, 10.0)))),
+        MeshMaterial3d(materials.add(Color::from(LinearRgba::new(1.0, 1.0, 1.0, 0.7)))),
+        Transform::from_xyz(0.0, 0.0, 0.0),
+    ));
+    commands.spawn((
+        Camera3d::default(),
+        Transform::from_xyz(-2.5, 4.0, 9.0).looking_at(Vec3::ZERO, Vec3::Y),
+        FreeCamera {
+            sensitivity: 0.2,
+            friction: 25.0,
+            walk_speed: 3.0,
+            run_speed: 9.0,
+            ..Default::default()
         }
-    }
-}
-
-fn update_people(query: Query<&mut Name, With<Person>>) {
-    for mut name in query {
-        if name.0 == "Alpha" {
-            name.0 = name.0.to_uppercase();
-        }
-    }
-}
-
-pub struct HelloPlugin;
-
-impl Plugin for HelloPlugin {
-    fn build(&self, app: &mut App) {
-        app        
-            .insert_resource(GreetTimer(Timer::from_seconds(2.0, TimerMode::Repeating)))
-            .add_systems(Update, (update_people, greet_people).chain())
-            .add_systems(Startup, add_people);
-    }
+    ));
 }
